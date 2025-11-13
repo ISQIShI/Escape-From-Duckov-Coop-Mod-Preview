@@ -5,16 +5,44 @@
     /// </summary>
     public enum MessagePriority : byte
     {
-        /// <summary>关键消息（投票、伤害、交互）- 通道0</summary>
+        /// <summary>
+        /// 关键功能：投票、伤害、拾取、交互
+        /// - 必须送达
+        /// - 严格有序
+        /// - 使用 ReliableOrdered
+        /// </summary>
         Critical = 0,
 
-        /// <summary>重要消息（血量、装备）- 通道1</summary>
+        /// <summary>
+        /// 重要状态：血量、装备、弹药
+        /// - 必须送达
+        /// - 只保留最新
+        /// - 使用 ReliableSequenced
+        /// </summary>
         Important = 1,
 
-        /// <summary>普通消息（NPC、物品生成）- 通道2</summary>
+        /// <summary>
+        /// 普通事件：NPC 状态、物品生成、环境交互
+        /// - 必须送达
+        /// - 顺序无关
+        /// - 使用 ReliableUnordered
+        /// </summary>
         Normal = 2,
 
-        /// <summary>高频消息（位置、动画）- 通道3</summary>
-        Frequent = 3
+        /// <summary>
+        /// 高频更新：位置、旋转、姿态、动画
+        /// - 可以丢弃
+        /// - 下一帧覆盖
+        /// - 使用 Unreliable
+        /// </summary>
+        Frequent = 3,
+
+        /// <summary>
+        /// 语音数据：VOIP 语音流
+        /// - 可以丢弃
+        /// - 只保留最新
+        /// - 使用 Sequenced
+        /// </summary>
+        Voice = 4
     }
 }
