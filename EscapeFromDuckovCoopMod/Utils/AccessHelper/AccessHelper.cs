@@ -1,6 +1,12 @@
+#define ACCESS_HELPER_ENABLE_CACHE_STATS
+
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+using System.Threading;
+#endif
 using HarmonyLib;
 using EscapeFromDuckovCoopMod.Utils.Logger.Tools;
 
@@ -59,6 +65,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 
             if (MethodCache.TryGetValue(key, out var cachedMethod))
             {
+                CacheStatistics.RecordMethodHit();
                 return cachedMethod;
             }
 
@@ -81,6 +88,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             if (methodInfo != null)
             {
                 MethodCache.TryAdd(key, methodInfo);
+                CacheStatistics.RecordMethodMiss();
             }
 
             return methodInfo;
@@ -104,6 +112,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 
             if (PropertyCache.TryGetValue(key, out var cachedProperty))
             {
+                CacheStatistics.RecordPropertyHit();
                 return cachedProperty;
             }
 
@@ -125,6 +134,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             if (propertyInfo != null)
             {
                 PropertyCache.TryAdd(key, propertyInfo);
+                CacheStatistics.RecordPropertyMiss();
             }
 
             return propertyInfo;
@@ -148,6 +158,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 
             if (FieldCache.TryGetValue(key, out var cachedField))
             {
+                CacheStatistics.RecordFieldHit();
                 return cachedField;
             }
 
@@ -169,6 +180,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             if (fieldInfo != null)
             {
                 FieldCache.TryAdd(key, fieldInfo);
+                CacheStatistics.RecordFieldMiss();
             }
 
             return fieldInfo;
@@ -291,6 +303,104 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             });
 
             return (AccessTools.FieldRef<TInstance, TField>)fieldRef;
+        }
+
+        public static AccessHelperCacheStatistics GetCacheStatistics()
+        {
+            return CacheStatistics.Snapshot();
+        }
+
+        public static void ResetCacheStatistics()
+        {
+            CacheStatistics.Reset();
+        }
+
+        public static void WarmupFields(params (Type DeclaringType, string FieldName)[] targets)
+        {
+            if (targets == null || targets.Length == 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                var target = targets[i];
+                if (target.DeclaringType == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    GetFieldInfo(target.DeclaringType, target.FieldName);
+                }
+                catch
+                {
+                    // 预热阶段忽略异常，保持容错
+                }
+            }
+        }
+
+        public static void WarmupMethods(params (Type DeclaringType, string MethodName, Type[] ParameterTypes)[] targets)
+        {
+            if (targets == null || targets.Length == 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                var target = targets[i];
+                if (target.DeclaringType == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var parameterTypes = target.ParameterTypes ?? Array.Empty<Type>();
+                    GetMethodInfo(target.DeclaringType, target.MethodName, parameterTypes);
+                }
+                catch
+                {
+                    // 预热阶段忽略异常，保持容错
+                }
+            }
+        }
+
+        public static void WarmupProperties(params (Type DeclaringType, string PropertyName)[] targets)
+        {
+            if (targets == null || targets.Length == 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                var target = targets[i];
+                if (target.DeclaringType == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    GetPropertyInfo(target.DeclaringType, target.PropertyName);
+                }
+                catch
+                {
+                    // 预热阶段忽略异常，保持容错
+                }
+            }
+        }
+
+        public static void ClearCaches()
+        {
+            FieldCache.Clear();
+            FieldRefCache.Clear();
+            MethodCache.Clear();
+            PropertyCache.Clear();
+            CacheStatistics.Reset();
         }
 
         public static object InvokeMethod(object instance, string methodName, params object[] parameters)
@@ -843,12 +953,11 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
                     var result = methodInfo.Invoke(null, args);
                     return CastReturnValue<TReturn>(result, methodInfo);
                 }
-
                 return InvokeStaticMethod<TReturn>(_declaringType, _methodName, args);
             }
         }
 
-        private readonly struct MethodCacheKey : IEquatable<MethodCacheKey>
+        public readonly struct MethodCacheKey : IEquatable<MethodCacheKey>
         {
             private readonly Type _declaringType;
             private readonly string _methodName;
@@ -920,6 +1029,132 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 
                     return hash;
                 }
+            }
+        }
+
+        public readonly struct AccessHelperCacheStatistics
+        {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+            public AccessHelperCacheStatistics(long fieldHits, long fieldMisses, long propertyHits, long propertyMisses, long methodHits, long methodMisses)
+            {
+                FieldHits = fieldHits;
+                FieldMisses = fieldMisses;
+                PropertyHits = propertyHits;
+                PropertyMisses = propertyMisses;
+                MethodHits = methodHits;
+                MethodMisses = methodMisses;
+            }
+
+            public long FieldHits { get; }
+
+            public long FieldMisses { get; }
+
+            public long PropertyHits { get; }
+
+            public long PropertyMisses { get; }
+
+            public long MethodHits { get; }
+
+            public long MethodMisses { get; }
+#else
+            public long FieldHits => 0;
+
+            public long FieldMisses => 0;
+
+            public long PropertyHits => 0;
+
+            public long PropertyMisses => 0;
+
+            public long MethodHits => 0;
+
+            public long MethodMisses => 0;
+#endif
+        }
+
+        private static class CacheStatistics
+        {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+            private static long _fieldHits;
+            private static long _fieldMisses;
+            private static long _propertyHits;
+            private static long _propertyMisses;
+            private static long _methodHits;
+            private static long _methodMisses;
+#endif
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void RecordFieldHit()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Increment(ref _fieldHits);
+#endif
+            }
+
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void RecordFieldMiss()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Increment(ref _fieldMisses);
+#endif
+            }
+
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void RecordPropertyHit()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Increment(ref _propertyHits);
+#endif
+            }
+
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void RecordPropertyMiss()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Increment(ref _propertyMisses);
+#endif
+            }
+
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void RecordMethodHit()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Increment(ref _methodHits);
+#endif
+            }
+
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void RecordMethodMiss()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Increment(ref _methodMisses);
+#endif
+            }
+
+            public static AccessHelperCacheStatistics Snapshot()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                return new AccessHelperCacheStatistics(
+                    Interlocked.Read(ref _fieldHits),
+                    Interlocked.Read(ref _fieldMisses),
+                    Interlocked.Read(ref _propertyHits),
+                    Interlocked.Read(ref _propertyMisses),
+                    Interlocked.Read(ref _methodHits),
+                    Interlocked.Read(ref _methodMisses));
+#else
+                return new AccessHelperCacheStatistics();
+#endif
+            }
+
+            [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+            public static void Reset()
+            {
+#if ACCESS_HELPER_ENABLE_CACHE_STATS
+                Interlocked.Exchange(ref _fieldHits, 0);
+                Interlocked.Exchange(ref _fieldMisses, 0);
+                Interlocked.Exchange(ref _propertyHits, 0);
+                Interlocked.Exchange(ref _propertyMisses, 0);
+                Interlocked.Exchange(ref _methodHits, 0);
+                Interlocked.Exchange(ref _methodMisses, 0);
+#endif
             }
         }
     }
