@@ -2,19 +2,31 @@ using System;
 
 namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 {
+    /// <summary>
+    /// AccessHelper 统一的异常基类，封装反射访问过程中产生的错误信息。
+    /// </summary>
     public class AccessHelperException : Exception
     {
+        /// <summary>
+        /// 使用自定义错误消息初始化异常。
+        /// </summary>
         public AccessHelperException(string message)
             : base(message)
         {
         }
 
+        /// <summary>
+        /// 使用错误消息与内部异常初始化异常。
+        /// </summary>
         public AccessHelperException(string message, Exception innerException)
             : base(message, innerException)
         {
         }
     }
 
+    /// <summary>
+    /// 在目标类型中找不到指定字段时抛出的异常。
+    /// </summary>
     public class FieldNotFoundException : AccessHelperException
     {
         public FieldNotFoundException(Type declaringType, string fieldName)
@@ -29,6 +41,9 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
         public string FieldName { get; }
     }
 
+    /// <summary>
+    /// 在目标类型中找不到指定方法时抛出的异常。
+    /// </summary>
     public class MethodNotFoundException : AccessHelperException
     {
         public MethodNotFoundException(Type declaringType, string methodName)
@@ -69,6 +84,9 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
         }
     }
 
+    /// <summary>
+    /// 在目标类型中找不到指定属性时抛出的异常。
+    /// </summary>
     public class PropertyNotFoundException : AccessHelperException
     {
         public PropertyNotFoundException(Type declaringType, string propertyName)
@@ -83,6 +101,9 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
         public string PropertyName { get; }
     }
 
+    /// <summary>
+    /// 当成员的实际类型与调用方期望不一致时抛出的异常。
+    /// </summary>
     public class TypeMismatchException : AccessHelperException
     {
         public TypeMismatchException(string memberName, Type expectedType, Type actualType)

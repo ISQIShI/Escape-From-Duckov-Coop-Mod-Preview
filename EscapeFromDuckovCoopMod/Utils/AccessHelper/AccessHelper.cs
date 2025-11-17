@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 #if ACCESS_HELPER_ENABLE_CACHE_STATS
@@ -12,30 +13,47 @@ using EscapeFromDuckovCoopMod.Utils.Logger.Tools;
 
 namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 {
-    public static class AccessHelper
+    /// <summary>
+    /// 封装 Harmony <see cref="AccessTools"/> 的常用访问能力，提供统一的缓存、错误处理和链式调用接口。
+    /// </summary>
+    public static partial class AccessHelper
     {
-        private static readonly ConcurrentDictionary<(Type DeclaringType, string MemberName), FieldInfo> FieldCache = new();
-        private static readonly ConcurrentDictionary<(Type DeclaringType, string MemberName), Delegate> FieldRefCache = new();
-        private static readonly ConcurrentDictionary<MethodCacheKey, MethodInfo> MethodCache = new();
-        private static readonly ConcurrentDictionary<(Type DeclaringType, string MemberName), PropertyInfo> PropertyCache = new();
+        // 字段缓存条目，统一保存 FieldInfo 与相关委托。
+        private static readonly ConcurrentDictionary<FieldCacheKey, FieldCacheEntry> FieldCache = new();
+        // 方法缓存条目，统一保存 MethodInfo 与调用委托。
+        private static readonly ConcurrentDictionary<MethodCacheKey, MethodCacheEntry> MethodCache = new();
+        // 属性缓存条目，统一保存 PropertyInfo 与访问委托。
+        private static readonly ConcurrentDictionary<PropertyCacheKey, PropertyCacheEntry> PropertyCache = new();
 
+        /// <summary>
+        /// 获取或设置 AccessHelper 的错误处理模式，控制异常抛出/吞噬。
+        /// </summary>
         public static AccessHelperErrorHandlingMode ErrorMode
         {
             get { return ErrorHandler.Mode; }
             set { ErrorHandler.Mode = value; }
         }
 
+        /// <summary>
+        /// 获取或设置错误日志回调，当错误模式允许时由 AccessHelper 调用此回调记录异常信息。
+        /// </summary>
         public static Action<AccessHelperException> ErrorLoggingCallback
         {
             get { return ErrorHandler.Logger; }
             set { ErrorHandler.Logger = value; }
         }
 
+        /// <summary>
+        /// 为指定的泛型声明类型构建链式访问入口。
+        /// </summary>
         public static TypeChain<TDeclaring> For<TDeclaring>()
         {
             return new TypeChain<TDeclaring>(typeof(TDeclaring));
         }
 
+        /// <summary>
+        /// 为运行时提供的声明类型构建链式访问入口。
+        /// </summary>
         public static TypeChain For(Type declaringType)
         {
             if (declaringType == null)
@@ -46,275 +64,485 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             return new TypeChain(declaringType);
         }
 
-        public static MethodInfo GetMethodInfo<TDeclaring>(string methodName, params Type[] parameterTypes)
+        public static class Instance
         {
-            return GetMethodInfo(typeof(TDeclaring), methodName, parameterTypes);
-        }
-
-        public static MethodInfo GetMethodInfo(Type declaringType, string methodName, params Type[] parameterTypes)
-        {
-            if (declaringType == null)
+            #region 字段
+            
+            public static FieldInfo GetFieldInfo<TDeclaring>(string fieldName)
             {
-                throw new ArgumentNullException(nameof(declaringType));
+                return GetFieldInfo(typeof(TDeclaring), fieldName);
             }
-
-            methodName = NormalizeMemberName(methodName);
-            parameterTypes = NormalizeParameterTypes(parameterTypes);
-
-            var key = new MethodCacheKey(declaringType, methodName, parameterTypes);
-
-            if (MethodCache.TryGetValue(key, out var cachedMethod))
+            
+            public static FieldInfo GetFieldInfo(Type declaringType, string fieldName)
             {
-                CacheStatistics.RecordMethodHit();
-                return cachedMethod;
-            }
-
-            MethodInfo methodInfo = null;
-            var parameters = parameterTypes.Length == 0 ? null : parameterTypes;
-
-            try
-            {
-                methodInfo = AccessTools.Method(declaringType, methodName, parameters);
-                if (methodInfo == null)
+                if (declaringType == null)
                 {
-                    throw new MethodNotFoundException(declaringType, methodName, parameters ?? Array.Empty<Type>());
+                    throw new ArgumentNullException(nameof(declaringType));
+                }
+
+                fieldName = NormalizeMemberName(fieldName);
+
+                var key = new FieldCacheKey(declaringType, fieldName);
+                var cacheEntry = FieldCache.GetOrAdd(key, static _ => new FieldCacheEntry());
+
+                try
+                {
+                    var fieldInfo = cacheEntry.GetOrCreateInfo(key, false, out var created);
+                    RecordFieldCacheStatistics(created);
+                    return fieldInfo;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<FieldInfo>(declaringType, fieldName, exception);
                 }
             }
-            catch (Exception exception)
+
+            public static AccessTools.FieldRef<TDeclaring, TField> GetFieldRef<TDeclaring, TField>(string fieldName)
             {
-                return ErrorHandler.Report<MethodInfo>(declaringType, methodName, exception);
-            }
+                fieldName = NormalizeMemberName(fieldName);
 
-            if (methodInfo != null)
-            {
-                MethodCache.TryAdd(key, methodInfo);
-                CacheStatistics.RecordMethodMiss();
-            }
+                var key = new FieldCacheKey(typeof(TDeclaring), fieldName);
+                var cacheEntry = FieldCache.GetOrAdd(key, static _ => new FieldCacheEntry());
 
-            return methodInfo;
-        }
-
-        public static PropertyInfo GetPropertyInfo<TDeclaring>(string propertyName)
-        {
-            return GetPropertyInfo(typeof(TDeclaring), propertyName);
-        }
-
-        public static PropertyInfo GetPropertyInfo(Type declaringType, string propertyName)
-        {
-            if (declaringType == null)
-            {
-                throw new ArgumentNullException(nameof(declaringType));
-            }
-
-            propertyName = NormalizeMemberName(propertyName);
-
-            var key = (declaringType, propertyName);
-
-            if (PropertyCache.TryGetValue(key, out var cachedProperty))
-            {
-                CacheStatistics.RecordPropertyHit();
-                return cachedProperty;
-            }
-
-            PropertyInfo propertyInfo = null;
-
-            try
-            {
-                propertyInfo = AccessTools.Property(declaringType, propertyName);
-                if (propertyInfo == null)
+                try
                 {
-                    throw new PropertyNotFoundException(declaringType, propertyName);
+                    var fieldRef = cacheEntry.GetOrCreateInstanceFieldRef<TDeclaring, TField>(key, out var created);
+                    RecordFieldCacheStatistics(created);
+                    return fieldRef;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<AccessTools.FieldRef<TDeclaring, TField>>(typeof(TDeclaring), fieldName, exception);
                 }
             }
-            catch (Exception exception)
+            
+            public static TField GetFieldValue<TDeclaring,TField>(TDeclaring instance, string fieldName)
             {
-                return ErrorHandler.Report<PropertyInfo>(declaringType, propertyName, exception);
-            }
-
-            if (propertyInfo != null)
-            {
-                PropertyCache.TryAdd(key, propertyInfo);
-                CacheStatistics.RecordPropertyMiss();
-            }
-
-            return propertyInfo;
-        }
-
-        public static FieldInfo GetFieldInfo<TDeclaring>(string fieldName)
-        {
-            return GetFieldInfo(typeof(TDeclaring), fieldName);
-        }
-
-        public static FieldInfo GetFieldInfo(Type declaringType, string fieldName)
-        {
-            if (declaringType == null)
-            {
-                throw new ArgumentNullException(nameof(declaringType));
-            }
-
-            fieldName = NormalizeMemberName(fieldName);
-
-            var key = (declaringType, fieldName);
-
-            if (FieldCache.TryGetValue(key, out var cachedField))
-            {
-                CacheStatistics.RecordFieldHit();
-                return cachedField;
-            }
-
-            FieldInfo fieldInfo = null;
-
-            try
-            {
-                fieldInfo = AccessTools.Field(declaringType, fieldName);
-                if (fieldInfo == null)
+                if (instance == null)
                 {
-                    throw new FieldNotFoundException(declaringType, fieldName);
+                    throw new ArgumentNullException(nameof(instance));
+                }
+
+                var fieldRef = GetFieldRef<TDeclaring, TField>(fieldName);
+                try
+                {
+                    return fieldRef(instance);
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<TField>(typeof(TDeclaring), fieldName, exception);
                 }
             }
-            catch (Exception exception)
+
+            public static void SetFieldValue<TDeclaring,TField>(TDeclaring instance, string fieldName, TField value)
             {
-                return ErrorHandler.Report<FieldInfo>(declaringType, fieldName, exception);
+                if (instance == null)
+                {
+                    throw new ArgumentNullException(nameof(instance));
+                }
+
+                var fieldRef = GetFieldRef<TDeclaring, TField>(fieldName);
+                try
+                {
+                    fieldRef(instance) = value;
+                }
+                catch (Exception exception)
+                {
+                    ErrorHandler.Report(typeof(TDeclaring), fieldName, exception);
+                }
             }
 
-            if (fieldInfo != null)
+            #endregion
+
+            #region 属性
+            
+            public static PropertyInfo GetPropertyInfo(Type declaringType, string propertyName)
             {
-                FieldCache.TryAdd(key, fieldInfo);
-                CacheStatistics.RecordFieldMiss();
+                if (declaringType == null)
+                {
+                    throw new ArgumentNullException(nameof(declaringType));
+                }
+
+                propertyName = NormalizeMemberName(propertyName);
+
+                var key = new PropertyCacheKey(declaringType, propertyName);
+                var cacheEntry = PropertyCache.GetOrAdd(key, static _ => new PropertyCacheEntry());
+
+                try
+                {
+                    var propertyInfo = cacheEntry.GetOrCreateInfo(key, false, out var created);
+                    RecordPropertyCacheStatistics(created);
+                    return propertyInfo;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<PropertyInfo>(declaringType, propertyName, exception);
+                }
             }
 
-            return fieldInfo;
+            public static TProperty GetPropertyValue<TProperty>(object instance, string propertyName)
+            {
+                if (instance == null)
+                {
+                    throw new ArgumentNullException(nameof(instance));
+                }
+
+                var propertyInfo = GetPropertyInfo(instance.GetType(), propertyName);
+                var getter = propertyInfo.GetGetMethod(true);
+                if (getter == null)
+                {
+                    throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"get_{propertyInfo.Name}");
+                }
+
+                try
+                {
+                    var rawValue = getter.Invoke(instance, Array.Empty<object>());
+                    return CastPropertyValue<TProperty>(rawValue, propertyInfo);
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<TProperty>(propertyInfo.DeclaringType, propertyInfo.Name, exception);
+                }
+            }
+
+            public static void SetPropertyValue<TProperty>(object instance, string propertyName, TProperty value)
+            {
+                if (instance == null)
+                {
+                    throw new ArgumentNullException(nameof(instance));
+                }
+
+                var propertyInfo = GetPropertyInfo(instance.GetType(), propertyName);
+                var setter = propertyInfo.GetSetMethod(true);
+                if (setter == null)
+                {
+                    throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"set_{propertyInfo.Name}");
+                }
+
+                try
+                {
+                    setter.Invoke(instance, new object[] { value });
+                }
+                catch (Exception exception)
+                {
+                    ErrorHandler.Report(propertyInfo.DeclaringType, propertyInfo.Name, exception);
+                }
+            }
+            
+            #endregion
+
+            #region 方法
+            
+            public static MethodInfo GetMethodInfo(Type declaringType, string methodName, Type[] parameterTypes)
+            {
+                if (declaringType == null)
+                {
+                    throw new ArgumentNullException(nameof(declaringType));
+                }
+
+                methodName = NormalizeMemberName(methodName);
+                var normalizedParameterTypes = NormalizeParameterTypes(parameterTypes);
+
+                var key = new MethodCacheKey(declaringType, methodName, normalizedParameterTypes);
+                var cacheEntry = MethodCache.GetOrAdd(key, static _ => new MethodCacheEntry());
+
+                try
+                {
+                    var methodInfo = cacheEntry.GetOrCreateInfo(key, false, out var created);
+                    RecordMethodCacheStatistics(created);
+                    return methodInfo;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<MethodInfo>(declaringType, methodName, exception);
+                }
+            }
+
+            public static TDelegate GetMethodDelegate<TDelegate>(Type declaringType, string methodName, params Type[] parameterTypes)
+                where TDelegate : Delegate
+            {
+                var normalizedParameterTypes = NormalizeParameterTypes(parameterTypes);
+                var key = new MethodCacheKey(declaringType, methodName, normalizedParameterTypes);
+                var cacheEntry = MethodCache.GetOrAdd(key, static _ => new MethodCacheEntry());
+
+                try
+                {
+                    var methodInfo = cacheEntry.GetOrCreateInfo(key, false, out var infoCreated);
+                    var methodDelegate = cacheEntry.GetOrCreateDelegate<TDelegate>(methodInfo, false, out var delegateCreated);
+                    RecordMethodCacheStatistics(infoCreated || delegateCreated);
+                    return methodDelegate;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<TDelegate>(declaringType, methodName, exception);
+                }
+            }
+
+            public static object InvokeMethod(object instance, string methodName, params object[] parameters)
+            {
+                return InvokeMethod<object>(instance, methodName, parameters);
+            }
+
+            public static TReturn InvokeMethod<TReturn>(object instance, string methodName, params object[] parameters)
+            {
+                if (instance == null)
+                {
+                    throw new ArgumentNullException(nameof(instance));
+                }
+
+                var args = parameters ?? Array.Empty<object>();
+                var methodInfo = ResolveMethod(instance.GetType(), methodName, args, false);
+                var result = methodInfo.Invoke(instance, args);
+                return CastReturnValue<TReturn>(result, methodInfo);
+            }
+            
+            #endregion
         }
-
-        public static TField GetFieldValue<TField>(object instance, string fieldName)
+        
+        public static class Static
         {
-            if (instance == null)
+            #region 字段
+
+            public static FieldInfo GetFieldInfo<TDeclaring>(string fieldName)
             {
-                throw new ArgumentNullException(nameof(instance));
+                return GetFieldInfo(typeof(TDeclaring), fieldName);
+            }
+            
+            public static FieldInfo GetFieldInfo(Type declaringType, string fieldName)
+            {
+                if (declaringType == null)
+                {
+                    throw new ArgumentNullException(nameof(declaringType));
+                }
+
+                fieldName = NormalizeMemberName(fieldName);
+
+                var key = new FieldCacheKey(declaringType, fieldName);
+                var cacheEntry = FieldCache.GetOrAdd(key, static _ => new FieldCacheEntry());
+
+                try
+                {
+                    var fieldInfo = cacheEntry.GetOrCreateInfo(key, true, out var created);
+                    RecordFieldCacheStatistics(created);
+                    return fieldInfo;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<FieldInfo>(declaringType, fieldName, exception);
+                }
+            }
+            
+            public static AccessTools.FieldRef<TField> GetFieldRef<TDeclaring, TField>(string fieldName)
+            {
+                fieldName = NormalizeMemberName(fieldName);
+
+                var key = new FieldCacheKey(typeof(TDeclaring), fieldName);
+                var cacheEntry = FieldCache.GetOrAdd(key, static _ => new FieldCacheEntry());
+
+                try
+                {
+                    var fieldRef = cacheEntry.GetOrCreateStaticFieldRef<TField>(key, out var created);
+                    RecordFieldCacheStatistics(created);
+                    return fieldRef;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<AccessTools.FieldRef<TField>>(typeof(TDeclaring), fieldName, exception);
+                }
             }
 
-            var fieldInfo = GetFieldInfo(instance.GetType(), fieldName);
-            if (fieldInfo == null)
+            public static TField GetFieldValue<TDeclaring,TField>(string fieldName)
             {
-                return default(TField);
+                var fieldRef = GetFieldRef<TDeclaring, TField>(fieldName);
+                try
+                {
+                    return fieldRef();
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<TField>(typeof(TDeclaring), fieldName, exception);
+                }
             }
 
-            if (fieldInfo.IsStatic)
+            public static void SetFieldValue<TDeclaring,TField>(string fieldName, TField value)
             {
-                return ErrorHandler.Report<TField>(fieldInfo.DeclaringType, fieldInfo.Name, new AccessHelperException($"字段 {fieldInfo.Name} 是静态字段，请使用 GetStaticFieldValue。"));
+                var fieldRef = GetFieldRef<TDeclaring, TField>(fieldName);
+                try
+                {
+                    fieldRef() = value;
+                }
+                catch (Exception exception)
+                {
+                    ErrorHandler.Report(typeof(TDeclaring), fieldName, exception);
+                }
+            }
+            
+            #endregion
+
+            #region 属性
+            
+            public static PropertyInfo GetPropertyInfo(Type declaringType, string propertyName)
+            {
+                if (declaringType == null)
+                {
+                    throw new ArgumentNullException(nameof(declaringType));
+                }
+
+                propertyName = NormalizeMemberName(propertyName);
+
+                var key = new PropertyCacheKey(declaringType, propertyName);
+                var cacheEntry = PropertyCache.GetOrAdd(key, static _ => new PropertyCacheEntry());
+
+                try
+                {
+                    var propertyInfo = cacheEntry.GetOrCreateInfo(key, true, out var created);
+                    RecordPropertyCacheStatistics(created);
+                    return propertyInfo;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<PropertyInfo>(declaringType, propertyName, exception);
+                }
             }
 
-            try
+            public static TProperty GetPropertyValue<TProperty>(Type declaringType, string propertyName)
             {
-                var rawValue = fieldInfo.GetValue(instance);
-                return CastValue<TField>(rawValue, fieldInfo);
+                var propertyInfo = GetPropertyInfo(declaringType, propertyName);
+                var getter = propertyInfo.GetGetMethod(true);
+                if (getter == null)
+                {
+                    throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"get_{propertyInfo.Name}");
+                }
+
+                try
+                {
+                    var rawValue = getter.Invoke(null, Array.Empty<object>());
+                    return CastPropertyValue<TProperty>(rawValue, propertyInfo);
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<TProperty>(propertyInfo.DeclaringType, propertyInfo.Name, exception);
+                }
             }
-            catch (Exception exception)
+
+            public static void SetPropertyValue<TProperty>(Type declaringType, string propertyName, TProperty value)
             {
-                return ErrorHandler.Report<TField>(fieldInfo.DeclaringType, fieldInfo.Name, exception);
+                var propertyInfo = GetPropertyInfo(declaringType, propertyName);
+                var setter = propertyInfo.GetSetMethod(true);
+                if (setter == null)
+                {
+                    throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"set_{propertyInfo.Name}");
+                }
+
+                try
+                {
+                    setter.Invoke(null, new object[] { value });
+                }
+                catch (Exception exception)
+                {
+                    ErrorHandler.Report(propertyInfo.DeclaringType, propertyInfo.Name, exception);
+                }
             }
+
+            #endregion
+
+            #region 方法
+            
+            public static MethodInfo GetMethodInfo(Type declaringType, string methodName, Type[] parameterTypes)
+            {
+                if (declaringType == null)
+                {
+                    throw new ArgumentNullException(nameof(declaringType));
+                }
+
+                methodName = NormalizeMemberName(methodName);
+                var normalizedParameterTypes = NormalizeParameterTypes(parameterTypes);
+
+                var key = new MethodCacheKey(declaringType, methodName, normalizedParameterTypes);
+                var cacheEntry = MethodCache.GetOrAdd(key, static _ => new MethodCacheEntry());
+
+                try
+                {
+                    var methodInfo = cacheEntry.GetOrCreateInfo(key, true, out var created);
+                    RecordMethodCacheStatistics(created);
+                    return methodInfo;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<MethodInfo>(declaringType, methodName, exception);
+                }
+            }
+
+            public static TDelegate GetMethodDelegate<TDelegate>(Type declaringType, string methodName, params Type[] parameterTypes)
+                where TDelegate : Delegate
+            {
+                var normalizedParameterTypes = NormalizeParameterTypes(parameterTypes);
+                var key = new MethodCacheKey(declaringType, methodName, normalizedParameterTypes);
+                var cacheEntry = MethodCache.GetOrAdd(key, static _ => new MethodCacheEntry());
+
+                try
+                {
+                    var methodInfo = cacheEntry.GetOrCreateInfo(key, true, out var infoCreated);
+                    var methodDelegate = cacheEntry.GetOrCreateDelegate<TDelegate>(methodInfo, true, out var delegateCreated);
+                    RecordMethodCacheStatistics(infoCreated || delegateCreated);
+                    return methodDelegate;
+                }
+                catch (AccessHelperException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    return ErrorHandler.Report<TDelegate>(declaringType, methodName, exception);
+                }
+            }
+
+            public static object InvokeMethod(Type declaringType, string methodName, params object[] parameters)
+            {
+                return InvokeMethod<object>(declaringType, methodName, parameters);
+            }
+
+            public static TReturn InvokeMethod<TReturn>(Type declaringType, string methodName, params object[] parameters)
+            {
+                var args = parameters ?? Array.Empty<object>();
+                var methodInfo = ResolveMethod(declaringType, methodName, args, true);
+                var result = methodInfo.Invoke(null, args);
+                return CastReturnValue<TReturn>(result, methodInfo);
+            }
+            #endregion
         }
-
-        public static TField GetStaticFieldValue<TField>(Type declaringType, string fieldName)
-        {
-            var fieldInfo = GetFieldInfo(declaringType, fieldName);
-            if (fieldInfo == null)
-            {
-                return default(TField);
-            }
-
-            if (!fieldInfo.IsStatic)
-            {
-                return ErrorHandler.Report<TField>(fieldInfo.DeclaringType, fieldInfo.Name, new AccessHelperException($"字段 {fieldInfo.Name} 不是静态字段，请使用 GetFieldValue。"));
-            }
-
-            try
-            {
-                var rawValue = fieldInfo.GetValue(null);
-                return CastValue<TField>(rawValue, fieldInfo);
-            }
-            catch (Exception exception)
-            {
-                return ErrorHandler.Report<TField>(fieldInfo.DeclaringType, fieldInfo.Name, exception);
-            }
-        }
-
-        public static void SetFieldValue<TField>(object instance, string fieldName, TField value)
-        {
-            if (instance == null)
-            {
-                throw new ArgumentNullException(nameof(instance));
-            }
-
-            var fieldInfo = GetFieldInfo(instance.GetType(), fieldName);
-            if (fieldInfo == null)
-            {
-                return;
-            }
-
-            if (fieldInfo.IsStatic)
-            {
-                ErrorHandler.Report(fieldInfo.DeclaringType, fieldInfo.Name, new AccessHelperException($"字段 {fieldInfo.Name} 是静态字段，请使用 SetStaticFieldValue。"));
-                return;
-            }
-
-            try
-            {
-                fieldInfo.SetValue(instance, value);
-            }
-            catch (Exception exception)
-            {
-                ErrorHandler.Report(fieldInfo.DeclaringType, fieldInfo.Name, exception);
-            }
-        }
-
-        public static void SetStaticFieldValue<TField>(Type declaringType, string fieldName, TField value)
-        {
-            var fieldInfo = GetFieldInfo(declaringType, fieldName);
-            if (fieldInfo == null)
-            {
-                return;
-            }
-
-            if (!fieldInfo.IsStatic)
-            {
-                ErrorHandler.Report(fieldInfo.DeclaringType, fieldInfo.Name, new AccessHelperException($"字段 {fieldInfo.Name} 不是静态字段，请使用 SetFieldValue。"));
-                return;
-            }
-
-            try
-            {
-                fieldInfo.SetValue(null, value);
-            }
-            catch (Exception exception)
-            {
-                ErrorHandler.Report(fieldInfo.DeclaringType, fieldInfo.Name, exception);
-            }
-        }
-
-        public static AccessTools.FieldRef<TInstance, TField> GetFieldRef<TInstance, TField>(string fieldName)
-        {
-            fieldName = NormalizeMemberName(fieldName);
-            var key = (typeof(TInstance), fieldName);
-
-            var fieldRef = FieldRefCache.GetOrAdd(key, static k =>
-            {
-                return AccessTools.FieldRefAccess<TInstance, TField>(k.MemberName);
-            });
-
-            return (AccessTools.FieldRef<TInstance, TField>)fieldRef;
-        }
-
-        public static AccessHelperCacheStatistics GetCacheStatistics()
-        {
-            return CacheStatistics.Snapshot();
-        }
-
-        public static void ResetCacheStatistics()
-        {
-            CacheStatistics.Reset();
-        }
-
+        
+        /// <summary>
+        /// 通过预热字段信息的方式提前填充缓存，降低首轮访问的反射开销。
+        /// </summary>
         public static void WarmupFields(params (Type DeclaringType, string FieldName)[] targets)
         {
             if (targets == null || targets.Length == 0)
@@ -332,7 +560,8 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 
                 try
                 {
-                    GetFieldInfo(target.DeclaringType, target.FieldName);
+                    Instance.GetFieldInfo(target.DeclaringType, target.FieldName);
+                    Static.GetFieldInfo(target.DeclaringType, target.FieldName);
                 }
                 catch
                 {
@@ -341,6 +570,39 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             }
         }
 
+        /// <summary>
+        /// 预热指定的属性缓存，适用于初始化阶段的批量加载。
+        /// </summary>
+        public static void WarmupProperties(params (Type DeclaringType, string PropertyName)[] targets)
+        {
+            if (targets == null || targets.Length == 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                var target = targets[i];
+                if (target.DeclaringType == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    Instance.GetPropertyInfo(target.DeclaringType, target.PropertyName);
+                    Static.GetPropertyInfo(target.DeclaringType, target.PropertyName);
+                }
+                catch
+                {
+                    // 预热阶段忽略异常，保持容错
+                }
+            }
+        }
+        
+        /// <summary>
+        /// 预热指定的方法缓存，可包含参数类型以便准确定位重载。
+        /// </summary>
         public static void WarmupMethods(params (Type DeclaringType, string MethodName, Type[] ParameterTypes)[] targets)
         {
             if (targets == null || targets.Length == 0)
@@ -359,7 +621,8 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
                 try
                 {
                     var parameterTypes = target.ParameterTypes ?? Array.Empty<Type>();
-                    GetMethodInfo(target.DeclaringType, target.MethodName, parameterTypes);
+                    Instance.GetMethodInfo(target.DeclaringType, target.MethodName, parameterTypes);
+                    Static.GetMethodInfo(target.DeclaringType, target.MethodName, parameterTypes);
                 }
                 catch
                 {
@@ -367,154 +630,18 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
                 }
             }
         }
-
-        public static void WarmupProperties(params (Type DeclaringType, string PropertyName)[] targets)
-        {
-            if (targets == null || targets.Length == 0)
-            {
-                return;
-            }
-
-            for (int i = 0; i < targets.Length; i++)
-            {
-                var target = targets[i];
-                if (target.DeclaringType == null)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    GetPropertyInfo(target.DeclaringType, target.PropertyName);
-                }
-                catch
-                {
-                    // 预热阶段忽略异常，保持容错
-                }
-            }
-        }
-
+        
+        /// <summary>
+        /// 清空所有缓存并重置统计信息，适用于热重载或资源清理场景。
+        /// </summary>
         public static void ClearCaches()
         {
             FieldCache.Clear();
-            FieldRefCache.Clear();
             MethodCache.Clear();
             PropertyCache.Clear();
             CacheStatistics.Reset();
         }
-
-        public static object InvokeMethod(object instance, string methodName, params object[] parameters)
-        {
-            return InvokeMethod<object>(instance, methodName, parameters);
-        }
-
-        public static TReturn InvokeMethod<TReturn>(object instance, string methodName, params object[] parameters)
-        {
-            if (instance == null)
-            {
-                throw new ArgumentNullException(nameof(instance));
-            }
-
-            if (parameters == null)
-            {
-                parameters = Array.Empty<object>();
-            }
-
-            var methodInfo = ResolveMethod(instance.GetType(), methodName, parameters);
-            var result = methodInfo.Invoke(instance, parameters);
-            return CastReturnValue<TReturn>(result, methodInfo);
-        }
-
-        public static object InvokeStaticMethod(Type declaringType, string methodName, params object[] parameters)
-        {
-            return InvokeStaticMethod<object>(declaringType, methodName, parameters);
-        }
-
-        public static TReturn InvokeStaticMethod<TReturn>(Type declaringType, string methodName, params object[] parameters)
-        {
-            if (parameters == null)
-            {
-                parameters = Array.Empty<object>();
-            }
-
-            var methodInfo = ResolveMethod(declaringType, methodName, parameters);
-            if (!methodInfo.IsStatic)
-            {
-                throw new InvalidOperationException($"方法 {methodInfo.Name} 不是静态方法，请调用 InvokeMethod。 声明类型: {methodInfo.DeclaringType?.FullName}");
-            }
-
-            var result = methodInfo.Invoke(null, parameters);
-            return CastReturnValue<TReturn>(result, methodInfo);
-        }
-
-        public static TProperty GetPropertyValue<TProperty>(object instance, string propertyName)
-        {
-            if (instance == null)
-            {
-                throw new ArgumentNullException(nameof(instance));
-            }
-
-            var propertyInfo = GetPropertyInfo(instance.GetType(), propertyName);
-            if (propertyInfo.GetGetMethod(true) == null)
-            {
-                throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"get_{propertyInfo.Name}");
-            }
-
-            var rawValue = propertyInfo.GetValue(instance);
-            return CastPropertyValue<TProperty>(rawValue, propertyInfo);
-        }
-
-        public static TProperty GetStaticPropertyValue<TProperty>(Type declaringType, string propertyName)
-        {
-            var propertyInfo = GetPropertyInfo(declaringType, propertyName);
-            if (!IsStaticProperty(propertyInfo))
-            {
-                throw new InvalidOperationException($"属性 {propertyInfo.Name} 不是静态属性，请调用 GetPropertyValue。 声明类型: {propertyInfo.DeclaringType?.FullName}");
-            }
-
-            if (propertyInfo.GetGetMethod(true) == null)
-            {
-                throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"get_{propertyInfo.Name}");
-            }
-
-            var rawValue = propertyInfo.GetValue(null);
-            return CastPropertyValue<TProperty>(rawValue, propertyInfo);
-        }
-
-        public static void SetPropertyValue<TProperty>(object instance, string propertyName, TProperty value)
-        {
-            if (instance == null)
-            {
-                throw new ArgumentNullException(nameof(instance));
-            }
-
-            var propertyInfo = GetPropertyInfo(instance.GetType(), propertyName);
-            var setter = propertyInfo.GetSetMethod(true);
-            if (setter == null)
-            {
-                throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"set_{propertyInfo.Name}");
-            }
-
-            setter.Invoke(instance, new object[] { value });
-        }
-
-        public static void SetStaticPropertyValue<TProperty>(Type declaringType, string propertyName, TProperty value)
-        {
-            var propertyInfo = GetPropertyInfo(declaringType, propertyName);
-            if (!IsStaticProperty(propertyInfo))
-            {
-                throw new InvalidOperationException($"属性 {propertyInfo.Name} 不是静态属性，请调用 SetPropertyValue。 声明类型: {propertyInfo.DeclaringType?.FullName}");
-            }
-
-            var setter = propertyInfo.GetSetMethod(true);
-            if (setter == null)
-            {
-                throw new MissingMethodException(propertyInfo.DeclaringType?.FullName, $"set_{propertyInfo.Name}");
-            }
-
-            setter.Invoke(null, new object[] { value });
-        }
-
+        
         private static string NormalizeMemberName(string memberName)
         {
             if (string.IsNullOrWhiteSpace(memberName))
@@ -545,14 +672,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             throw new InvalidCastException($"无法将字段 {fieldInfo.Name} 的值从 {rawValue.GetType().FullName} 转换为 {typeof(TField).FullName}");
         }
 
-        private static bool IsStaticProperty(PropertyInfo propertyInfo)
-        {
-            var getter = propertyInfo.GetGetMethod(true);
-            var setter = propertyInfo.GetSetMethod(true);
-            return (getter != null && getter.IsStatic) || (setter != null && setter.IsStatic);
-        }
-
-        private static MethodInfo ResolveMethod(Type declaringType, string methodName, object[] parameters)
+        private static MethodInfo ResolveMethod(Type declaringType, string methodName, object[] parameters, bool expectStatic)
         {
             if (declaringType == null)
             {
@@ -565,12 +685,16 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             var parameterTypes = InferParameterTypes(actualParameters);
             try
             {
-                return GetMethodInfo(declaringType, methodName, parameterTypes);
+                return expectStatic
+                    ? Static.GetMethodInfo(declaringType, methodName, parameterTypes)
+                    : Instance.GetMethodInfo(declaringType, methodName, parameterTypes);
             }
             catch (MissingMethodException) when (parameterTypes.Length == 0)
             {
                 // 当无法推断参数类型或未指定参数类型时，尝试无参方法
-                return GetMethodInfo(declaringType, methodName);
+                return expectStatic
+                    ? Static.GetMethodInfo(declaringType, methodName, Array.Empty<Type>())
+                    : Instance.GetMethodInfo(declaringType, methodName, Array.Empty<Type>());
             }
         }
 
@@ -652,6 +776,9 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
             throw new InvalidCastException($"无法将属性 {propertyInfo.Name} 的值从 {rawValue.GetType().FullName} 转换为 {typeof(TProperty).FullName}");
         }
 
+        /// <summary>
+        /// 面向泛型声明类型的链式调用入口。
+        /// </summary>
         public readonly struct TypeChain<TDeclaring>
         {
             private readonly Type _declaringType;
@@ -666,27 +793,42 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
                 _declaringType = declaringType;
             }
 
+            /// <summary>
+            /// 获取链式上下文中的声明类型。
+            /// </summary>
             public Type DeclaringType
             {
                 get { return _declaringType; }
             }
 
+            /// <summary>
+            /// 进入字段访问链式接口。
+            /// </summary>
             public FieldChain<TDeclaring> Field(string fieldName)
             {
                 return new FieldChain<TDeclaring>(_declaringType, fieldName);
             }
 
+            /// <summary>
+            /// 进入属性访问链式接口。
+            /// </summary>
             public PropertyChain<TDeclaring> Property(string propertyName)
             {
                 return new PropertyChain<TDeclaring>(_declaringType, propertyName);
             }
 
+            /// <summary>
+            /// 进入方法访问链式接口。
+            /// </summary>
             public MethodChain<TDeclaring> Method(string methodName)
             {
                 return new MethodChain<TDeclaring>(_declaringType, methodName, null);
             }
         }
 
+        /// <summary>
+        /// 面向运行时类型对象的链式调用入口。
+        /// </summary>
         public readonly struct TypeChain
         {
             private readonly Type _declaringType;
@@ -701,337 +843,96 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
                 _declaringType = declaringType;
             }
 
+            /// <summary>
+            /// 获取链式上下文中的声明类型。
+            /// </summary>
             public Type DeclaringType
             {
                 get { return _declaringType; }
             }
 
+            /// <summary>
+            /// 进入字段访问链式接口。
+            /// </summary>
             public FieldChain<object> Field(string fieldName)
             {
                 return new FieldChain<object>(_declaringType, fieldName);
             }
 
+            /// <summary>
+            /// 进入属性访问链式接口。
+            /// </summary>
             public PropertyChain<object> Property(string propertyName)
             {
                 return new PropertyChain<object>(_declaringType, propertyName);
             }
 
+            /// <summary>
+            /// 进入方法访问链式接口。
+            /// </summary>
             public MethodChain<object> Method(string methodName)
             {
                 return new MethodChain<object>(_declaringType, methodName, null);
             }
         }
 
-        public readonly struct FieldChain<TDeclaring>
+        #region 缓存状态统计
+        
+        [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+        private static void RecordFieldCacheStatistics(bool created)
         {
-            private readonly Type _declaringType;
-            private readonly string _fieldName;
-
-            internal FieldChain(Type declaringType, string fieldName)
+            if (created)
             {
-                if (declaringType == null)
-                {
-                    throw new ArgumentNullException(nameof(declaringType));
-                }
-
-                _declaringType = declaringType;
-                _fieldName = NormalizeMemberName(fieldName);
+                CacheStatistics.RecordFieldMiss();
             }
-
-            public Type DeclaringType
+            else
             {
-                get { return _declaringType; }
-            }
-
-            public string FieldName
-            {
-                get { return _fieldName; }
-            }
-
-            public FieldInfo Info
-            {
-                get { return GetFieldInfo(_declaringType, _fieldName); }
-            }
-
-            public TField GetValue<TField>(TDeclaring instance)
-            {
-                if (ReferenceEquals(instance, null))
-                {
-                    throw new ArgumentNullException(nameof(instance));
-                }
-
-                return GetFieldValue<TField>(instance, _fieldName);
-            }
-
-            public void SetValue<TField>(TDeclaring instance, TField value)
-            {
-                if (ReferenceEquals(instance, null))
-                {
-                    throw new ArgumentNullException(nameof(instance));
-                }
-
-                SetFieldValue(instance, _fieldName, value);
-            }
-
-            public TField GetStaticValue<TField>()
-            {
-                return GetStaticFieldValue<TField>(_declaringType, _fieldName);
-            }
-
-            public void SetStaticValue<TField>(TField value)
-            {
-                SetStaticFieldValue(_declaringType, _fieldName, value);
-            }
-
-            public AccessTools.FieldRef<TDeclaring, TField> GetFieldRef<TField>()
-            {
-                return GetFieldRef<TDeclaring, TField>(_fieldName);
+                CacheStatistics.RecordFieldHit();
             }
         }
 
-        public readonly struct PropertyChain<TDeclaring>
+        [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+        private static void RecordPropertyCacheStatistics(bool created)
         {
-            private readonly Type _declaringType;
-            private readonly string _propertyName;
-
-            internal PropertyChain(Type declaringType, string propertyName)
+            if (created)
             {
-                if (declaringType == null)
-                {
-                    throw new ArgumentNullException(nameof(declaringType));
-                }
-
-                _declaringType = declaringType;
-                _propertyName = NormalizeMemberName(propertyName);
+                CacheStatistics.RecordPropertyMiss();
             }
-
-            public Type DeclaringType
+            else
             {
-                get { return _declaringType; }
-            }
-
-            public string PropertyName
-            {
-                get { return _propertyName; }
-            }
-
-            public PropertyInfo Info
-            {
-                get { return GetPropertyInfo(_declaringType, _propertyName); }
-            }
-
-            public TProperty GetValue<TProperty>(TDeclaring instance)
-            {
-                if (ReferenceEquals(instance, null))
-                {
-                    throw new ArgumentNullException(nameof(instance));
-                }
-
-                return GetPropertyValue<TProperty>(instance, _propertyName);
-            }
-
-            public void SetValue<TProperty>(TDeclaring instance, TProperty value)
-            {
-                if (ReferenceEquals(instance, null))
-                {
-                    throw new ArgumentNullException(nameof(instance));
-                }
-
-                SetPropertyValue(instance, _propertyName, value);
-            }
-
-            public TProperty GetStaticValue<TProperty>()
-            {
-                return GetStaticPropertyValue<TProperty>(_declaringType, _propertyName);
-            }
-
-            public void SetStaticValue<TProperty>(TProperty value)
-            {
-                SetStaticPropertyValue(_declaringType, _propertyName, value);
+                CacheStatistics.RecordPropertyHit();
             }
         }
 
-        public readonly struct MethodChain<TDeclaring>
+        [Conditional("ACCESS_HELPER_ENABLE_CACHE_STATS")]
+        private static void RecordMethodCacheStatistics(bool created)
         {
-            private readonly Type _declaringType;
-            private readonly string _methodName;
-            private readonly Type[] _parameterTypes;
-
-            internal MethodChain(Type declaringType, string methodName, Type[] parameterTypes)
+            if (created)
             {
-                if (declaringType == null)
-                {
-                    throw new ArgumentNullException(nameof(declaringType));
-                }
-
-                _declaringType = declaringType;
-                _methodName = NormalizeMemberName(methodName);
-
-                if (parameterTypes == null)
-                {
-                    _parameterTypes = null;
-                }
-                else if (parameterTypes.Length == 0)
-                {
-                    _parameterTypes = Array.Empty<Type>();
-                }
-                else
-                {
-                    _parameterTypes = NormalizeParameterTypes(parameterTypes);
-                }
+                CacheStatistics.RecordMethodMiss();
             }
-
-            public Type DeclaringType
+            else
             {
-                get { return _declaringType; }
-            }
-
-            public string MethodName
-            {
-                get { return _methodName; }
-            }
-
-            public MethodChain<TDeclaring> WithParameters(params Type[] parameterTypes)
-            {
-                return new MethodChain<TDeclaring>(_declaringType, _methodName, parameterTypes);
-            }
-
-            public MethodInfo Info
-            {
-                get
-                {
-                    if (_parameterTypes != null)
-                    {
-                        return GetMethodInfo(_declaringType, _methodName, _parameterTypes);
-                    }
-
-                    return GetMethodInfo(_declaringType, _methodName);
-                }
-            }
-
-            public void Invoke(TDeclaring instance, params object[] parameters)
-            {
-                Invoke<object>(instance, parameters);
-            }
-
-            public TReturn Invoke<TReturn>(TDeclaring instance, params object[] parameters)
-            {
-                if (ReferenceEquals(instance, null))
-                {
-                    throw new ArgumentNullException(nameof(instance));
-                }
-
-                var args = parameters ?? Array.Empty<object>();
-
-                if (_parameterTypes != null)
-                {
-                    var methodInfo = GetMethodInfo(_declaringType, _methodName, _parameterTypes);
-                    var result = methodInfo.Invoke(instance, args);
-                    return CastReturnValue<TReturn>(result, methodInfo);
-                }
-
-                return InvokeMethod<TReturn>(instance, _methodName, args);
-            }
-
-            public void InvokeStatic(params object[] parameters)
-            {
-                InvokeStatic<object>(parameters);
-            }
-
-            public TReturn InvokeStatic<TReturn>(params object[] parameters)
-            {
-                var args = parameters ?? Array.Empty<object>();
-
-                if (_parameterTypes != null)
-                {
-                    var methodInfo = GetMethodInfo(_declaringType, _methodName, _parameterTypes);
-                    if (!methodInfo.IsStatic)
-                    {
-                        throw new InvalidOperationException($"方法 {_methodName} 不是静态方法，请调用 Invoke。");
-                    }
-
-                    var result = methodInfo.Invoke(null, args);
-                    return CastReturnValue<TReturn>(result, methodInfo);
-                }
-                return InvokeStaticMethod<TReturn>(_declaringType, _methodName, args);
+                CacheStatistics.RecordMethodHit();
             }
         }
-
-        public readonly struct MethodCacheKey : IEquatable<MethodCacheKey>
+        
+        /// <summary>
+        /// 获取当前缓存的统计数据快照。
+        /// </summary>
+        public static AccessHelperCacheStatistics GetCacheStatistics()
         {
-            private readonly Type _declaringType;
-            private readonly string _methodName;
-            private readonly Type[] _parameterTypes;
-            private readonly int _hashCode;
-
-            public MethodCacheKey(Type declaringType, string methodName, Type[] parameterTypes)
-            {
-                _declaringType = declaringType ?? throw new ArgumentNullException(nameof(declaringType));
-                _methodName = methodName ?? throw new ArgumentNullException(nameof(methodName));
-                _parameterTypes = parameterTypes?.Length > 0 ? (Type[])parameterTypes.Clone() : Array.Empty<Type>();
-                _hashCode = CalculateHashCode(_declaringType, _methodName, _parameterTypes);
-            }
-
-            public bool Equals(MethodCacheKey other)
-            {
-                if (_declaringType != other._declaringType)
-                {
-                    return false;
-                }
-
-                if (!string.Equals(_methodName, other._methodName, StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                if (_parameterTypes.Length != other._parameterTypes.Length)
-                {
-                    return false;
-                }
-
-                for (var i = 0; i < _parameterTypes.Length; i++)
-                {
-                    if (_parameterTypes[i] != other._parameterTypes[i])
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
-
-            public override bool Equals(object obj)
-            {
-                return obj is MethodCacheKey other && Equals(other);
-            }
-
-            public override int GetHashCode()
-            {
-                return _hashCode;
-            }
-
-            public Type DeclaringType => _declaringType;
-
-            public string MethodName => _methodName;
-
-            public Type[] ParameterTypes => _parameterTypes;
-
-            private static int CalculateHashCode(Type declaringType, string methodName, Type[] parameterTypes)
-            {
-                unchecked
-                {
-                    var hash = declaringType.GetHashCode();
-                    hash = (hash * 397) ^ methodName.GetHashCode(StringComparison.Ordinal);
-                    foreach (var parameter in parameterTypes)
-                    {
-                        hash = (hash * 397) ^ (parameter?.GetHashCode() ?? 0);
-                    }
-
-                    return hash;
-                }
-            }
+            return CacheStatistics.Snapshot();
         }
 
+        /// <summary>
+        /// 将缓存统计计数器重置为初始状态。
+        /// </summary>
+        public static void ResetCacheStatistics()
+        {
+            CacheStatistics.Reset();
+        }
+        
         public readonly struct AccessHelperCacheStatistics
         {
 #if ACCESS_HELPER_ENABLE_CACHE_STATS
@@ -1157,5 +1058,7 @@ namespace EscapeFromDuckovCoopMod.Utils.AccessHelper
 #endif
             }
         }
+        
+        #endregion
     }
 }
